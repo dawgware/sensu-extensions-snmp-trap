@@ -1,6 +1,7 @@
 require "sensu/extension"
 require "sensu/extensions/snmp-trap/snmp-patch"
 require "thread"
+require "to_regexp"
 
 module Sensu
   module Extension
@@ -69,7 +70,7 @@ module Sensu
       def convert_to_map(configured_map)
         configured_map.map do |mapping|
           [
-            Regexp.new(mapping.first),
+            mapping.first.to_regexp(detect: true),
             mapping.last.is_a?(String) ? mapping.last.to_sym : mapping.last
           ]
         end
@@ -91,6 +92,42 @@ module Sensu
         else
           @result_status_map = RESULT_STATUS_MAP
         end
+      end
+
+      ##
+      # Result remap is a configurable map that defines replacement values for SNMP trap varbind values
+      # for use in Sensu check result attribute. The map defines the SNMP varbind, Sensu check attribute and
+      # remap value. Expected values may be in the form of regex patterns. 
+      # Example: 
+      # [["msgSeverity",["status",[5,0],[1,2],[4,1],[0,7]]]]
+      # msgSeverity is the SNMP varbind, status is the Sensu check attribute to map value. The tuples are the
+      # expected values and remap values. If 5 is value for msgSeverity in trap then it is replaced by 0.
+      # In the check results the status for the alert would be 0. Expected values can be 
+      # 
+      def result_remap_map
+        return @result_remap_map if @result_remap_map
+        if options[:result_remap_map] && options[:result_remap_map].is_a?(Array)
+          remap_map = {}
+          options[:result_remap_map].each do |mapping|
+            remaps = []
+            varbind_field = mapping.first.to_regexp(detect: true)
+            mapping.last.each do |remappings|
+              if remappings.is_a?(Array)
+                # Check expected value, if a String then check if empty, this is for forced remap. Otherwise treat as a regex.
+                if remappings.first.is_a?(String)
+                    remaps << [remappings.first.empty? ? remappings.first : remappings.first.to_regexp(detect: true),remappings.last]
+                else
+                    remaps << remappings
+                end
+              else
+                remap_map[varbind_field] = {:sensufield => remappings.is_a?(String) ? remappings.to_sym : remappings}
+              end
+            end
+            remap_map[varbind_field][:remap] = remaps
+          end
+          @result_remap_map = remap_map
+        end
+        @result_remap_map
       end
 
       def start_snmpv2_listener!
@@ -272,11 +309,38 @@ module Sensu
       end
 
       def determine_trap_status(trap)
-        oid_symbolic_name = determine_trap_oid(trap)
-        mapping = result_status_map.detect do |mapping|
-          oid_symbolic_name =~ mapping.first
+        trap.varbind_list.each do |varbind|
+          oid_symbolic_name = @mibs.name(varbind.name.to_oid)
+        # oid_symbolic_name = determine_trap_oid(trap)
+          mapping = result_status_map.detect do |mapping|
+            oid_symbolic_name =~ mapping.first
+          end
+          mapping ? mapping.last : 0
         end
-        mapping ? mapping.last : 0
+      end
+
+      ##
+      # Function to check if oid value is remapped.
+      # Remapped value is returned otherwise nil if
+      # oid symbolic name not in remap list or oid value
+      # is not remapped.
+      ##
+      def process_remaps(symbolic_name, trap_value)
+        mapping = result_remap_map.detect do |mapping|
+          symbolic_name =~ mapping.first
+        end
+        if mapping
+          remapvalue = mapping.last[:remap].detect do |remapvalue|
+            # Check the oid value against the expected value in remap list
+            # If oid value == expected value then remapped value is used
+            # If the expected value is a "" then remapped value is used regardless of oid value
+            (remapvalue.first.is_a?(String) && remapvalue.first == "") || (remapvalue.first.is_a?(Regexp) ? trap_value.to_s =~ remapvalue.first : trap_value == remapvalue.first)
+          end
+          if remapvalue
+            return mapping.last[:sensufield], remapvalue.last
+          end
+        end
+        return nil,nil
       end
 
       def process_trap(trap)
@@ -304,7 +368,11 @@ module Sensu
                 result[mapping.last] = value
               end
             end
-          else
+            field, remap_value = process_remaps(symbolic_name, value)
+            unless field.nil? || remap_value.nil?
+              result[field] = remap_value
+            end
+          else 
             @logger.error("snmp trap check extension failed to convert varbind", {
               :symbolic_name => symbolic_name,
               :asn1_type => varbind.value.asn1_type,

@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "sensu-extensions-snmp-trap"
-  spec.version       = "0.2.0"
+  spec.version       = "0.2.1"
   spec.authors       = ["Sensu-Extensions and contributors"]
   spec.email         = ["<sensu-users@googlegroups.com>"]
 
@@ -15,6 +15,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "sensu-extension"
   spec.add_dependency "snmp", "1.2.0"
+  spec.add_dependency "to_regexp", "0.2.1"
 
   spec.add_development_dependency "bundler", "~> 1.6"
   spec.add_development_dependency "rake"
